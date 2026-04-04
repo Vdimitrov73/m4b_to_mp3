@@ -1,0 +1,114 @@
+name: Build and Release .exe
+
+# Triggers on version tags like v1.0.0
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Check out source ───────────────────────────────────────────────
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ──────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # ── 3. Install PyInstaller ────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      # ── 4. Patch version.txt and AppxManifest.xml ─────────────────────────
+      - name: Patch version files
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $parts = $tag.Split(".")
+          $v = "$($parts[0]), $($parts[1]), $($parts[2]), 0"
+          (Get-Content version.txt) -replace "\(\d+, \d+, \d+, \d+\)", "($v)" | Set-Content version.txt
+
+      # ── 5. Build the executable ───────────────────────────────────────────
+      # --onefile   : single self-contained .exe
+      # --windowed  : no console window (GUI app)
+      # --name      : output filename
+      - name: Build .exe with PyInstaller
+        run: |
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name inaudible_batch `
+            --version-file version.txt `
+            inaudible_batch.py
+
+      # ── 6. Bundle into a zip ──────────────────────────────────────────────
+      - name: Create release ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $zipName = "m4b_to_mp3_$version.zip"
+
+          New-Item -ItemType Directory -Path release_staging
+
+          Copy-Item dist\inaudible_batch.exe  release_staging\
+          Copy-Item README.md                 release_staging\
+          Copy-Item INSTALL.md                release_staging\
+          Copy-Item CHANGELOG.md              release_staging\
+
+          Compress-Archive -Path release_staging\* -DestinationPath $zipName
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      # ── 7. Compute SHA-256 ────────────────────────────────────────────────
+      - name: Compute SHA-256
+        id: hash
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist\inaudible_batch.exe -Algorithm SHA256).Hash.ToLower()
+          echo "sha256=$hash" >> $env:GITHUB_OUTPUT
+          echo "SHA-256: $hash"
+
+      # ── 8. Create GitHub Release ──────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## M4B to MP3 Batch Converter ${{ github.ref_name }}
+
+            Batch-converts DRM-free `.m4b` audiobook files to MP3 using ffmpeg.
+
+            ### Download
+            - **[m4b_to_mp3_${{ github.ref_name }}.zip](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/m4b_to_mp3_${{ github.ref_name }}.zip)** — Windows standalone bundle (no Python required)
+            - **[install_shortcut.py](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install_shortcut.py)** — Python users: run once to create a Desktop shortcut
+
+            **Getting started (no Python):** unzip anywhere, run `inaudible_batch.exe`. Requires ffmpeg — see INSTALL.md.
+
+            **Getting started (Python):** place `inaudible_batch.py` in a folder, run `python install_shortcut.py`.
+
+            ### SmartScreen warning
+            Windows may show "Windows protected your PC". Click **More info → Run anyway**.
+            This warning appears because the executable is not signed with a paid EV certificate.
+
+            ### Verify integrity (optional)
+            ```
+            certutil -hashfile inaudible_batch.exe SHA256
+            ```
+            Expected: `${{ steps.hash.outputs.sha256 }}`
+
+            ### What's new
+            See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md)
+          files: |
+            ${{ env.ZIP_NAME }}
+            install_shortcut.py
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,44 @@
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# PyInstaller
+*.spec
+*.exe
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# ── Build artefacts ───────────────────────────────────────────────────────────
+release_staging/
+*.zip
+*.msix
+*.msixbundle
+*.appx
+build.env
+
+# ── MSIX / Store packaging ────────────────────────────────────────────────────
+# Local Windows packaging working directory — not part of source
+m4b-converter_msix/
+
+# ── OS / editor clutter ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.idea/
+.vscode/
+*.code-workspace
