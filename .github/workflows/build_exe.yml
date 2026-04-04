@@ -5,10 +5,19 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag to build (e.g. v1.0.0)'
+        required: true
 
 jobs:
   build:
     runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
     steps:
       # ── 1. Check out source ───────────────────────────────────────────────
@@ -31,10 +40,11 @@ jobs:
       - name: Patch version files
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $tag = "${{ env.RELEASE_TAG }}".TrimStart("v")
           $parts = $tag.Split(".")
           $v = "$($parts[0]), $($parts[1]), $($parts[2]), 0"
           (Get-Content version.txt) -replace "\(\d+, \d+, \d+, \d+\)", "($v)" | Set-Content version.txt
+          (Get-Content AppxManifest.xml) -replace 'Version="[\d.]+"', "Version=""$tag.0""" | Set-Content AppxManifest.xml
 
       # ── 5. Build the executable ───────────────────────────────────────────
       # --onefile   : single self-contained .exe
@@ -53,7 +63,7 @@ jobs:
       - name: Create release ZIP
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}"
+          $version = "${{ env.RELEASE_TAG }}"
           $zipName = "m4b_to_mp3_$version.zip"
 
           New-Item -ItemType Directory -Path release_staging
@@ -79,15 +89,15 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          name: ${{ env.RELEASE_TAG }}
           body: |
-            ## M4B to MP3 Batch Converter ${{ github.ref_name }}
+            ## M4B to MP3 Batch Converter ${{ env.RELEASE_TAG }}
 
             Batch-converts DRM-free `.m4b` audiobook files to MP3 using ffmpeg.
 
             ### Download
-            - **[m4b_to_mp3_${{ github.ref_name }}.zip](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/m4b_to_mp3_${{ github.ref_name }}.zip)** — Windows standalone bundle (no Python required)
-            - **[install_shortcut.py](https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install_shortcut.py)** — Python users: run once to create a Desktop shortcut
+            - **[m4b_to_mp3_${{ env.RELEASE_TAG }}.zip](https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/m4b_to_mp3_${{ env.RELEASE_TAG }}.zip)** — Windows standalone bundle (no Python required)
+            - **[install_shortcut.py](https://github.com/${{ github.repository }}/releases/download/${{ env.RELEASE_TAG }}/install_shortcut.py)** — Python users: run once to create a Desktop shortcut
 
             **Getting started (no Python):** unzip anywhere, run `inaudible_batch.exe`. Requires ffmpeg — see INSTALL.md.
 
