@@ -75,21 +75,23 @@ see the [Installing ffmpeg](INSTALL.md#installing-ffmpeg) section in INSTALL.md.
    - Adjust **Audio settings** (bitrate, sample rate, mono, normalize, chapters, output naming, multithreading) as desired.
    - Choose whether the progress bar shows **Total** or **Current file** progress.
 
-3. Click **Scan** — the tool recursively finds all `.m4b` files under the root.
+3. Click **Scan** — the tool recursively finds all `.m4b` files under the root and populates the checklist.
 
-4. Click **Start Conversion**.
+4. Use **Select All** / **Clear All** or tick/untick individual files to choose which titles to convert.
+
+5. Click **Start Conversion**.
 
    - The **main log** shows high-level steps and per-file status.
    - The **Logs…** button opens a separate window with the full ffmpeg console output.
    - The percent label under the progress bar shows the current overall or per‑file completion.
 
-5. You can click **Stop** at any time:
+6. You can click **Stop** at any time:
 
    - The running `ffmpeg` process is terminated.
    - The current file is treated as stopped (partial output discarded).
    - Remaining files in the list are not processed.
 
-6. At the end, the tool prints a summary:
+7. At the end, the tool prints a summary:
 
    - Total processed.
    - Converted successfully.

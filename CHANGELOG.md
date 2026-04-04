@@ -4,6 +4,19 @@ All notable changes to M4B to MP3 Batch Converter are listed here, newest first.
 
 ---
 
+## v1.0.1 — 2026-04-04
+
+- Added a checkable file list so you can choose exactly which scanned `.m4b`
+  files to convert
+- Scan now populates a "Files to convert" checklist instead of a plain log
+  listing
+- Added **Select All** / **Clear All** buttons next to Scan for quick
+  bulk selection
+- Summary line now shows how many files are selected (e.g. "Found 5 .m4b files
+  — 3 selected")
+- Start Conversion now runs only on the checked files and warns if nothing
+  is selected
+  
 ## v1.0.0 — 2026-04-04
 
 - Initial public release
