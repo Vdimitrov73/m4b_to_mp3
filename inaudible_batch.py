@@ -284,6 +284,7 @@ class ConverterApp(tk.Tk):
         self._thread       = None
         self._stop_event   = threading.Event()
         self._files        = []
+        self._file_checks  = []   # list of BooleanVar, one per scanned file
         self._current_proc = None   # ffmpeg Popen; killed immediately on Stop
 
         # progress state
@@ -482,13 +483,19 @@ class ConverterApp(tk.Tk):
             values=["author_title", "title", "title_author", "author"],
         ).pack(side=tk.LEFT, padx=(4, 0))
 
-        # Scan row
+        # Scan row — Scan / Select All / Clear All / summary
         r4 = ttk.Frame(self)
         r4.pack(fill=tk.X, **PAD)
         ttk.Button(r4, text="Scan", command=self._scan).pack(side=tk.LEFT)
+        ttk.Button(r4, text="Select All", command=self._select_all).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
+        ttk.Button(r4, text="Clear All", command=self._clear_all).pack(
+            side=tk.LEFT, padx=(4, 0)
+        )
         self._summary_var = tk.StringVar(value="")
         ttk.Label(r4, textvariable=self._summary_var, foreground="navy").pack(
-            side=tk.LEFT, padx=(8, 0)
+            side=tk.LEFT, padx=(10, 0)
         )
 
         # Progress bar + mode toggle
@@ -527,9 +534,40 @@ class ConverterApp(tk.Tk):
             fill=tk.X
         )
 
-        # Main log (high level)
+        # ── File checklist ────────────────────────────────────────────────
+        fl = ttk.LabelFrame(self, text="Files to convert")
+        fl.pack(fill=tk.X, **PAD)
+
+        # Scrollable inner frame for the checkboxes
+        fl_canvas = tk.Canvas(fl, height=90, highlightthickness=0)
+        fl_sb     = ttk.Scrollbar(fl, orient=tk.VERTICAL, command=fl_canvas.yview)
+        fl_canvas.configure(yscrollcommand=fl_sb.set)
+        fl_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        fl_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._check_frame = ttk.Frame(fl_canvas)
+        self._check_frame_id = fl_canvas.create_window(
+            (0, 0), window=self._check_frame, anchor="nw"
+        )
+        self._fl_canvas = fl_canvas
+
+        def _on_frame_configure(event):
+            fl_canvas.configure(scrollregion=fl_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            fl_canvas.itemconfig(self._check_frame_id, width=event.width)
+
+        self._check_frame.bind("<Configure>", _on_frame_configure)
+        fl_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling inside the checklist
+        def _on_mousewheel(event):
+            fl_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        fl_canvas.bind("<MouseWheel>", _on_mousewheel)
+
+        # ── Main log (high level) ─────────────────────────────────────────
         self._log = scrolledtext.ScrolledText(
-            self, state=tk.DISABLED, height=14, font=("Consolas", 9)
+            self, state=tk.DISABLED, height=12, font=("Consolas", 9)
         )
         self._log.pack(fill=tk.BOTH, expand=True, **PAD)
         self._log.tag_config("ok",   foreground="green")
@@ -666,6 +704,51 @@ class ConverterApp(tk.Tk):
             self._ffprobe_var.set(f)
 
     # ------------------------------------------------------------------
+    def _populate_checklist(self):
+        """Rebuild the file checklist from self._files (all checked by default)."""
+        for widget in self._check_frame.winfo_children():
+            widget.destroy()
+        self._file_checks = []
+        for path in self._files:
+            var = tk.BooleanVar(value=True)
+            self._file_checks.append(var)
+            cb = ttk.Checkbutton(
+                self._check_frame,
+                text=path,
+                variable=var,
+                command=self._update_summary,
+            )
+            cb.pack(anchor=tk.W, padx=4, pady=1)
+        self._fl_canvas.yview_moveto(0)
+
+    def _selected_files(self):
+        """Return the subset of self._files that are checked."""
+        return [f for f, v in zip(self._files, self._file_checks) if v.get()]
+
+    def _update_summary(self):
+        n_total    = len(self._files)
+        n_selected = len(self._selected_files())
+        if n_total == 0:
+            self._summary_var.set("")
+        elif n_selected == n_total:
+            self._summary_var.set("Found %d .m4b file%s — all selected." % (
+                n_total, "s" if n_total != 1 else ""))
+        else:
+            self._summary_var.set("Found %d .m4b file%s — %d selected." % (
+                n_total, "s" if n_total != 1 else "", n_selected))
+        self._start_btn.config(state=tk.NORMAL if n_selected > 0 else tk.DISABLED)
+
+    def _select_all(self):
+        for v in self._file_checks:
+            v.set(True)
+        self._update_summary()
+
+    def _clear_all(self):
+        for v in self._file_checks:
+            v.set(False)
+        self._update_summary()
+
+    # ------------------------------------------------------------------
     def _scan(self):
         root = self._dir_var.get().strip()
         if not os.path.isdir(root):
@@ -677,8 +760,9 @@ class ConverterApp(tk.Tk):
         self._overall_total = n
         self._overall_done  = 0
         self._file_fraction = 0.0
-        self._summary_var.set("Found %d .m4b file%s." % (n, "s" if n != 1 else ""))
         self._refresh_progressbar()
+        self._populate_checklist()
+        self._update_summary()
         self._log_append("Scanned: %s\nFound %d .m4b file(s).\n" % (root, n), "info")
         for f in self._files:
             self._log_append("  " + f + "\n")
@@ -694,6 +778,11 @@ class ConverterApp(tk.Tk):
             return
         if not self._files:
             messagebox.showinfo("Nothing to do", "No .m4b files found. Run Scan first.")
+            return
+
+        selected = self._selected_files()
+        if not selected:
+            messagebox.showinfo("Nothing to do", "No files selected. Check at least one file.")
             return
         if ffprobe and not os.path.isfile(ffprobe):
             if not messagebox.askyesno(
@@ -719,14 +808,14 @@ class ConverterApp(tk.Tk):
         self._stop_event.clear()
         self._start_btn.config(state=tk.DISABLED)
         self._stop_btn.config(state=tk.NORMAL)
-        self._overall_total = len(self._files)
+        self._overall_total = len(selected)
         self._overall_done  = 0
         self._file_fraction = 0.0
         self._refresh_progressbar()
 
         self._thread = threading.Thread(
             target=self._worker,
-            args=(list(self._files), ffmpeg, ffprobe, settings),
+            args=(selected, ffmpeg, ffprobe, settings),
             daemon=True,
         )
         self._thread.start()
