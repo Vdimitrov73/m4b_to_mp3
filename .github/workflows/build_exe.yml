@@ -44,7 +44,6 @@ jobs:
           $parts = $tag.Split(".")
           $v = "$($parts[0]), $($parts[1]), $($parts[2]), 0"
           (Get-Content version.txt) -replace "\(\d+, \d+, \d+, \d+\)", "($v)" | Set-Content version.txt
-          (Get-Content AppxManifest.xml) -replace 'Version="[\d.]+"', "Version=""$tag.0""" | Set-Content AppxManifest.xml
 
       # ── 5. Build the executable ───────────────────────────────────────────
       # --onefile   : single self-contained .exe
