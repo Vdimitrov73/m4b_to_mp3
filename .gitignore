@@ -42,3 +42,7 @@ Desktop.ini
 .idea/
 .vscode/
 *.code-workspace
+
+# Claude Code
+.claude/*
+!CLAUDE.md

@@ -90,6 +90,7 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=30,
             )
             if result.returncode == 0 and result.stdout:
                 data = json.loads(result.stdout)
@@ -121,6 +122,9 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
                     ctags = ch.get("tags", {}) or {}
                     title = ctags.get("title") or ("Chapter %d" % i)
                     chapters.append((i, start, end, title))
+        except subprocess.TimeoutExpired:
+            # ffprobe timed out — non-fatal; fall through to ffmpeg scrape
+            pass
         except Exception:
             # ffprobe failure is non-fatal; fall through to ffmpeg scrape
             pass
@@ -135,6 +139,7 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                timeout=30,
             )
             for line in (r.stderr or "").splitlines():
                 line = line.strip()
@@ -151,7 +156,14 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
                     continue
                 if val:
                     tags[key] = val
+        except subprocess.TimeoutExpired:
+            # ffmpeg scrape timed out — continue with empty tags
+            pass
+        except OSError as exc:
+            # ffmpeg itself may not be available — non-fatal
+            pass
         except Exception:
+            # Any other failure is non-fatal; continue with empty tags
             pass
 
     return tags, duration, chapters, source_bitrate
@@ -991,6 +1003,14 @@ class ConverterApp(tk.Tk):
         elapsed     = time.time() - t0
         stderr_text = "\n".join(out_lines)
 
+        # Check return code FIRST: if ffmpeg completed successfully, keep the
+        # output even if a stop-request raced past (the kill signal arrived too
+        # late and the output is valid).
+        if proc.returncode == 0:
+            self._queue.put(("ok", "  Done in %.1fs\n" % elapsed))
+            self._queue.put(("file_progress", 1.0))
+            return "ok"
+
         if self._stop_event.is_set():
             # Remove the partial output file left by the killed process.
             try:
@@ -1003,11 +1023,6 @@ class ConverterApp(tk.Tk):
                 self._queue.put(("warn", "  Stopped — could not delete partial file: %s\n" % exc))
             self._queue.put(("file_progress", 0.0))
             return "stopped"
-
-        if proc.returncode == 0:
-            self._queue.put(("ok", "  Done in %.1fs\n" % elapsed))
-            self._queue.put(("file_progress", 1.0))
-            return "ok"
 
         if is_likely_protected(stderr_text):
             self._queue.put((
@@ -1043,11 +1058,19 @@ class ConverterApp(tk.Tk):
                 encoding="utf-8",
                 errors="replace",
                 creationflags=creationflags,
+                timeout=15,
             )
             if r.returncode == 0:
                 self._queue.put(("ok", "  Cover art saved.\n"))
             else:
                 self._queue.put(("warn", "  No cover art found or extraction failed.\n"))
+        except subprocess.TimeoutExpired:
+            self._queue.put(("warn", "  Cover extraction timed out (15 s).\n"))
+            try:
+                if os.path.exists(cover_path):
+                    os.remove(cover_path)
+            except OSError:
+                pass
         except Exception as exc:
             self._queue.put(("warn", "  Cover extraction error: %s\n" % exc))
 

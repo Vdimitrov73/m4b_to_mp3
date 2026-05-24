@@ -4,6 +4,28 @@ All notable changes to M4B to MP3 Batch Converter are listed here, newest first.
 
 ---
 
+## v1.0.2 — 2026-05-23
+
+### Bug fixes
+
+- **Critical** — Fixed a race condition in `_run_ffmpeg_with_progress` where
+  clicking Stop in the ~100ms window after ffmpeg finished but before the
+  worker processed completion caused a valid, fully-converted MP3 to be
+  deleted and reported as stopped. Return code is now checked before the
+  stop-event flag.
+- **Critical** — Added `timeout=30` to both `subprocess.run` calls in
+  `probe_metadata_and_chapters` (ffprobe JSON path and ffmpeg stderr-scrape
+  fallback). Without a timeout, a corrupt file or slow network drive would
+  freeze the worker thread — and the entire batch — indefinitely.
+- **High** — Added `timeout=15` to the ffmpeg `subprocess.run` call in
+  `_extract_cover`. A hung cover extraction would stall the whole batch.
+  Any partial cover file written before the timeout is now cleaned up
+  automatically.
+- **Medium** — Replaced bare `except Exception: pass` in the ffmpeg metadata
+  scrape fallback with explicit `subprocess.TimeoutExpired` → `OSError` →
+  `Exception` handlers to document the expected failure modes while keeping
+  the non-fatal, continue-on-error design intact.
+
 ## v1.0.1 — 2026-04-04
 
 - Added a checkable file list so you can choose exactly which scanned `.m4b`
