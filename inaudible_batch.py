@@ -43,7 +43,7 @@ _KNOWN_TAG_KEYS = {"title", "artist", "author", "album", "album_artist", "perfor
 def find_m4b_files(root_dir):
     """Return a sorted list of all .m4b files under root_dir (recursive)."""
     results = []
-    for dirpath, _dirs, files in os.walk(root_dir):
+    for dirpath, _dirs, files in os.walk(root_dir, onerror=lambda e: None):
         for fname in files:
             if fname.lower().endswith(".m4b"):
                 results.append(os.path.join(dirpath, fname))
@@ -228,8 +228,8 @@ def build_ffmpeg_cmd(ffmpeg, src, dst, settings, start=None, end=None):
     # optional trimming (placed before -i for fast seek)
     if start is not None:
         cmd += ["-ss", "%.3f" % float(start)]
-    if start is not None and end is not None and end > start:
-        cmd += ["-t", "%.3f" % float(end - start)]
+    if start is not None and end is not None:
+        cmd += ["-t", "%.3f" % max(0.0, float(end - start))]
 
     cmd += ["-i", src]
 
@@ -649,8 +649,12 @@ class ConverterApp(tk.Tk):
         text.config(state=tk.DISABLED)
 
     # ------------------------------------------------------------------
+    _DETAIL_LOG_MAX = 50000  # ~50k lines ≈ 10–20 MB depending on line length
+
     def _append_detail(self, text):
         self._detail_log.append(text)
+        if len(self._detail_log) > self._DETAIL_LOG_MAX:
+            self._detail_log = self._detail_log[-self._DETAIL_LOG_MAX // 2:]
         if (
             self._detail_text is not None
             and self._detail_window is not None
@@ -838,7 +842,10 @@ class ConverterApp(tk.Tk):
         self._stop_event.set()
         proc = self._current_proc
         if proc is not None and proc.poll() is None:
-            proc.terminate()
+            try:
+                proc.terminate()
+            except OSError:
+                pass
             self._log_append("Stop requested — terminating current ffmpeg job…\n", "warn")
         else:
             self._log_append("Stop requested.\n", "warn")
@@ -868,11 +875,11 @@ class ConverterApp(tk.Tk):
                 self._queue.put(("warn", "Stopped by user.\n"))
                 break
 
-            processed += 1
             self._queue.put(("info", "\n[%d/%d] %s\n" % (idx, total, os.path.basename(m4b))))
             self._queue.put(("info", "       %s\n" % m4b))
             self._queue.put(("status", "Converting %d/%d: %s" % (idx, total, os.path.basename(m4b))))
 
+            processed += 1
             tags, duration, chapters, source_bitrate = probe_metadata_and_chapters(ffmpeg, ffprobe, m4b)
             # Inject per-file source bitrate so build_ffmpeg_cmd can use it
             # when "Match source" (auto) mode is selected.
@@ -895,6 +902,7 @@ class ConverterApp(tk.Tk):
                     "  No chapter data available — converting as single file.\n",
                 ))
 
+            chap_files = []
             file_status = "ok"
             try:
                 if split:
@@ -906,8 +914,12 @@ class ConverterApp(tk.Tk):
                             "%s - %s" % (base_name, chap_title or ("Chapter %d" % chap_idx))
                         )
                         chap_mp3 = os.path.join(os.path.dirname(mp3_path), chap_base + ".mp3")
+                        chap_files.append(chap_mp3)
                         cmd = build_ffmpeg_cmd(ffmpeg, m4b, chap_mp3, settings, start=start, end=end)
                         status = self._run_ffmpeg_with_progress(cmd, None, chap_mp3)
+                        if self._stop_event.is_set():
+                            self._current_proc and self._current_proc.terminate()
+                            status = "stopped"
                         if status != "ok" and file_status == "ok":
                             file_status = status
                 else:
@@ -922,6 +934,19 @@ class ConverterApp(tk.Tk):
                 self._queue.put(("err", "  Exception: %s\n" % exc))
                 errors.append((m4b, str(exc)))
                 file_status = "error"
+                if not split and mp3_path and os.path.exists(mp3_path):
+                    try:
+                        os.remove(mp3_path)
+                    except OSError:
+                        pass
+
+            if file_status == "stopped" and chap_files:
+                for cf in chap_files:
+                    try:
+                        if os.path.exists(cf):
+                            os.remove(cf)
+                    except OSError:
+                        pass
 
             if file_status == "ok":
                 successes += 1
@@ -976,29 +1001,44 @@ class ConverterApp(tk.Tk):
         out_lines  = []
         last_frac  = 0.0
 
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.rstrip("\r\n")
-            if not line:
-                continue
-            out_lines.append(line)
-            self._queue.put(("plain", "    " + line + "\n"))
+        try:
+            while True:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                line = line.rstrip("\r\n")
+                if not line:
+                    continue
+                out_lines.append(line)
+                if self._queue.qsize() < 500:
+                    self._queue.put(("plain", "    " + line + "\n"))
 
-            if duration and duration > 0 and "time=" in line:
-                try:
-                    t_str   = line.split("time=", 1)[1].split()[0]
-                    h, m, s = t_str.split(":")
-                    seconds = float(h) * 3600 + float(m) * 60 + float(s)
-                    frac    = max(0.0, min(1.0, seconds / duration))
-                    if frac - last_frac >= 0.01:
-                        last_frac = frac
-                        self._queue.put(("file_progress", frac))
-                except Exception:
-                    pass
+                if duration and duration > 0 and "time=" in line:
+                    try:
+                        t_str   = line.split("time=", 1)[1].split()[0]
+                        h, m, s = t_str.split(":")
+                        seconds = float(h) * 3600 + float(m) * 60 + float(s)
+                        frac    = max(0.0, min(1.0, seconds / duration))
+                        if frac - last_frac >= 0.01:
+                            last_frac = frac
+                            self._queue.put(("file_progress", frac))
+                    except Exception:
+                        pass
+        except Exception as exc:
+            self._current_proc = None
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            self._queue.put(("err", "  ffmpeg read error: %s\n" % exc))
+            self._queue.put(("file_progress", 0.0))
+            return "error"
 
-        proc.wait()
+        try:
+            proc.wait(timeout=300)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
         self._current_proc = None
         elapsed     = time.time() - t0
         stderr_text = "\n".join(out_lines)
@@ -1073,6 +1113,11 @@ class ConverterApp(tk.Tk):
                 pass
         except Exception as exc:
             self._queue.put(("warn", "  Cover extraction error: %s\n" % exc))
+            try:
+                if os.path.exists(cover_path):
+                    os.remove(cover_path)
+            except OSError:
+                pass
 
     # ------------------------------------------------------------------
     def _poll_queue(self):
@@ -1101,6 +1146,8 @@ class ConverterApp(tk.Tk):
                     self._log_append(payload, tag_map.get(msg_type))
                     self._append_detail(payload)
         except queue.Empty:
+            pass
+        except Exception:
             pass
         self.after(100, self._poll_queue)
 
