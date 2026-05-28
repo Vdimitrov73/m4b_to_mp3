@@ -3,6 +3,16 @@
 All notable changes to M4B to MP3 Batch Converter are listed here, newest first.
 
 ---
+## v1.0.3 — 2026-05-27
+
+fix: apply validated QA patches (v1.0.3)
+
+- handle permission-denied dirs in find_m4b_files
+- add timeout/exception handling around ffmpeg read loop and wait()
+- fix stop race in split-by-chapters and clean up orphaned chapter files
+- delete partial MP3/cover files on errors
+- clamp chapter duration end<=start to avoid encoding to EOF
+- bound detail log and queue size to prevent memory growth
 
 ## v1.0.2 — 2026-05-23
 
