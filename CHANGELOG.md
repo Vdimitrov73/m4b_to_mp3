@@ -3,6 +3,16 @@
 All notable changes to M4B to MP3 Batch Converter are listed here, newest first.
 
 ---
+## v1.0.4 — 2026-07-26
+fix: preserve completed chapters on stop, harden process cleanup (v1.0.4)
+- fix critical data-loss bug: stopping mid chapter-split no longer deletes
+  chapters that had already finished converting — only unfinished or
+  failed chapter files are cleaned up
+- clear the ffmpeg process handle even if a forced kill doesn't exit
+  before the follow-up wait times out, so Stop can't silently stop working
+- log unexpected errors from the UI queue-polling loop instead of
+  silently discarding them
+
 ## v1.0.3 — 2026-05-27
 
 fix: apply validated QA patches (v1.0.3)

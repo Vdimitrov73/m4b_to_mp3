@@ -43,7 +43,9 @@ _KNOWN_TAG_KEYS = {"title", "artist", "author", "album", "album_artist", "perfor
 def find_m4b_files(root_dir):
     """Return a sorted list of all .m4b files under root_dir (recursive)."""
     results = []
-    for dirpath, _dirs, files in os.walk(root_dir, onerror=lambda e: None):
+    def _log_walk_error(e):
+        print(f"Warning: could not access {e.filename}: {e}", file=sys.stderr)
+    for dirpath, _dirs, files in os.walk(root_dir, onerror=_log_walk_error):
         for fname in files:
             if fname.lower().endswith(".m4b"):
                 results.append(os.path.join(dirpath, fname))
@@ -125,9 +127,9 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
         except subprocess.TimeoutExpired:
             # ffprobe timed out — non-fatal; fall through to ffmpeg scrape
             pass
-        except Exception:
+        except Exception as e:
             # ffprobe failure is non-fatal; fall through to ffmpeg scrape
-            pass
+            print(f"Warning: ffprobe failed for {m4b_path}: {e}", file=sys.stderr)
 
     # --- fallback: scrape basic tags from ffmpeg stderr -----------------------
     if not tags:
@@ -161,10 +163,10 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
             pass
         except OSError as exc:
             # ffmpeg itself may not be available — non-fatal
-            pass
-        except Exception:
+            print(f"Warning: ffmpeg scrape failed for {m4b_path}: {exc}", file=sys.stderr)
+        except Exception as e:
             # Any other failure is non-fatal; continue with empty tags
-            pass
+            print(f"Warning: ffmpeg scrape failed for {m4b_path}: {e}", file=sys.stderr)
 
     return tags, duration, chapters, source_bitrate
 
@@ -903,6 +905,7 @@ class ConverterApp(tk.Tk):
                 ))
 
             chap_files = []
+            completed_chaps = []
             file_status = "ok"
             try:
                 if split:
@@ -916,11 +919,14 @@ class ConverterApp(tk.Tk):
                         chap_mp3 = os.path.join(os.path.dirname(mp3_path), chap_base + ".mp3")
                         chap_files.append(chap_mp3)
                         cmd = build_ffmpeg_cmd(ffmpeg, m4b, chap_mp3, settings, start=start, end=end)
-                        status = self._run_ffmpeg_with_progress(cmd, None, chap_mp3)
+                        chap_duration = max(0.0, end - start)
+                        status = self._run_ffmpeg_with_progress(cmd, chap_duration, chap_mp3)
                         if self._stop_event.is_set():
                             self._current_proc and self._current_proc.terminate()
                             status = "stopped"
-                        if status != "ok" and file_status == "ok":
+                        if status == "ok":
+                            completed_chaps.append(chap_mp3)
+                        elif file_status == "ok":
                             file_status = status
                 else:
                     cmd = build_ffmpeg_cmd(ffmpeg, m4b, mp3_path, settings)
@@ -942,6 +948,8 @@ class ConverterApp(tk.Tk):
 
             if file_status == "stopped" and chap_files:
                 for cf in chap_files:
+                    if cf in completed_chaps:
+                        continue
                     try:
                         if os.path.exists(cf):
                             os.remove(cf)
@@ -998,6 +1006,14 @@ class ConverterApp(tk.Tk):
         )
         self._current_proc = proc
 
+        def _cleanup_partial_output():
+            """Remove the incomplete/corrupt output file for this run, if any."""
+            try:
+                if dst and os.path.exists(dst):
+                    os.remove(dst)
+            except OSError:
+                pass
+
         out_lines  = []
         last_frac  = 0.0
 
@@ -1032,13 +1048,17 @@ class ConverterApp(tk.Tk):
                 pass
             self._queue.put(("err", "  ffmpeg read error: %s\n" % exc))
             self._queue.put(("file_progress", 0.0))
+            _cleanup_partial_output()
             return "error"
 
         try:
             proc.wait(timeout=300)
         except subprocess.TimeoutExpired:
             proc.kill()
-            proc.wait(timeout=10)
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
         self._current_proc = None
         elapsed     = time.time() - t0
         stderr_text = "\n".join(out_lines)
@@ -1071,6 +1091,7 @@ class ConverterApp(tk.Tk):
                 % (proc.returncode, elapsed),
             ))
             self._queue.put(("file_progress", 0.0))
+            _cleanup_partial_output()
             return "protected"
 
         self._queue.put((
@@ -1078,6 +1099,7 @@ class ConverterApp(tk.Tk):
             "  ERROR: ffmpeg failed — exit %d after %.1fs\n" % (proc.returncode, elapsed),
         ))
         self._queue.put(("file_progress", 0.0))
+        _cleanup_partial_output()
         return "error"
 
     # ------------------------------------------------------------------
@@ -1109,15 +1131,15 @@ class ConverterApp(tk.Tk):
             try:
                 if os.path.exists(cover_path):
                     os.remove(cover_path)
-            except OSError:
-                pass
+            except OSError as e:
+                self._queue.put(("warn", "  Could not clean up partial cover file: %s\n" % e))
         except Exception as exc:
             self._queue.put(("warn", "  Cover extraction error: %s\n" % exc))
             try:
                 if os.path.exists(cover_path):
                     os.remove(cover_path)
-            except OSError:
-                pass
+            except OSError as e:
+                self._queue.put(("warn", "  Could not clean up partial cover file: %s\n" % e))
 
     # ------------------------------------------------------------------
     def _poll_queue(self):
@@ -1147,8 +1169,8 @@ class ConverterApp(tk.Tk):
                     self._append_detail(payload)
         except queue.Empty:
             pass
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: _poll_queue error: {e}", file=sys.stderr)
         self.after(100, self._poll_queue)
 
     # ------------------------------------------------------------------
