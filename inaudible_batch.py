@@ -57,22 +57,31 @@ def sanitize_filename(name):
     invalid = set('<>:"/\\|?*')
     cleaned = "".join("_" if ch in invalid or ord(ch) < 32 else ch for ch in name)
     cleaned = cleaned.strip().rstrip(".")
+    if cleaned.upper().split(".", 1)[0] in (
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ):
+        cleaned = "_" + cleaned
     return cleaned or "output"
 
 
 def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
-    """Return (tags, duration_seconds, chapters, source_bitrate).
+    """Return (tags, duration_seconds, chapters, source_bitrate, skipped).
 
     tags           : dict of lowercase metadata tags
     duration       : float seconds or None
     chapters       : list of (index, start_sec, end_sec, title_str)
     source_bitrate : int nearest standard CBR kbps (e.g. 128), or None if
                      ffprobe is unavailable or the field is missing
+    skipped        : list of warning strings for chapters dropped as
+                     malformed or zero-length
     """
     tags           = {}
     duration       = None
     chapters       = []
     source_bitrate = None
+    skipped        = []
 
     # --- primary: ffprobe JSON -------------------------------------------------
     if ffprobe_path and os.path.isfile(ffprobe_path):
@@ -118,11 +127,20 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
                 except Exception:
                     source_bitrate = None
 
-                for i, ch in enumerate(data.get("chapters", []), start=1):
-                    start = float(ch.get("start_time", "0") or 0.0)
-                    end   = float(ch.get("end_time",   "0") or 0.0)
+                for i, ch in enumerate(data.get("chapters", []) or [], start=1):
+                    try:
+                        start = float(ch.get("start_time", "0") or 0.0)
+                        end = float(ch.get("end_time", "0") or 0.0)
+                    except (TypeError, ValueError, AttributeError):
+                        skipped.append("Chapter %d has unreadable timestamps — skipped." % i)
+                        print(f"Warning: skipping malformed chapter {i} in {m4b_path}", file=sys.stderr)
+                        continue
+                    if not (end > start):
+                        skipped.append("Chapter %d has zero/negative length — skipped." % i)
+                        print(f"Warning: skipping zero-length chapter {i} in {m4b_path}", file=sys.stderr)
+                        continue
                     ctags = ch.get("tags", {}) or {}
-                    title = ctags.get("title") or ("Chapter %d" % i)
+                    title = (ctags.get("title") if isinstance(ctags, dict) else None) or ("Chapter %d" % i)
                     chapters.append((i, start, end, title))
         except subprocess.TimeoutExpired:
             # ffprobe timed out — non-fatal; fall through to ffmpeg scrape
@@ -168,7 +186,7 @@ def probe_metadata_and_chapters(ffmpeg_path, ffprobe_path, m4b_path):
             # Any other failure is non-fatal; continue with empty tags
             print(f"Warning: ffmpeg scrape failed for {m4b_path}: {e}", file=sys.stderr)
 
-    return tags, duration, chapters, source_bitrate
+    return tags, duration, chapters, source_bitrate, skipped
 
 
 def build_output_paths(m4b_path, tags, pattern):
@@ -204,6 +222,17 @@ def build_output_paths(m4b_path, tags, pattern):
     mp3_path   = os.path.join(base_dir, base + ".mp3")
     cover_path = os.path.join(base_dir, base + " cover.jpg")
     return mp3_path, cover_path, base
+
+
+def unique_path(path):
+    """Append ' (n)' before the extension while path exists on disk."""
+    if not os.path.exists(path):
+        return path
+    stem, ext = os.path.splitext(path)
+    n = 2
+    while os.path.exists("%s (%d)%s" % (stem, n, ext)):
+        n += 1
+    return "%s (%d)%s" % (stem, n, ext)
 
 
 def is_likely_protected(text):
@@ -271,7 +300,7 @@ def build_ffmpeg_cmd(ffmpeg, src, dst, settings, start=None, end=None):
         "-map_metadata", "0",
     ]
 
-    if settings["embed_chapters"]:
+    if settings["embed_chapters"] and start is None and end is None:
         cmd += ["-map_chapters", "0"]
     else:
         cmd += ["-map_chapters", "-1"]
@@ -754,7 +783,10 @@ class ConverterApp(tk.Tk):
         else:
             self._summary_var.set("Found %d .m4b file%s — %d selected." % (
                 n_total, "s" if n_total != 1 else "", n_selected))
-        self._start_btn.config(state=tk.NORMAL if n_selected > 0 else tk.DISABLED)
+        busy = self._thread is not None and self._thread.is_alive()
+        self._start_btn.config(
+            state=tk.NORMAL if (n_selected > 0 and not busy) else tk.DISABLED
+        )
 
     def _select_all(self):
         for v in self._file_checks:
@@ -768,6 +800,9 @@ class ConverterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     def _scan(self):
+        if self._thread is not None and self._thread.is_alive():
+            messagebox.showinfo("Busy", "Stop the current conversion before scanning.")
+            return
         root = self._dir_var.get().strip()
         if not os.path.isdir(root):
             messagebox.showerror("Error", "Directory not found\n" + root)
@@ -790,6 +825,10 @@ class ConverterApp(tk.Tk):
     def _start(self):
         ffmpeg  = self._ffmpeg_var.get().strip()
         ffprobe = self._ffprobe_var.get().strip()
+
+        if self._thread is not None and self._thread.is_alive():
+            messagebox.showinfo("Busy", "A conversion is already running.")
+            return
 
         if not os.path.isfile(ffmpeg):
             messagebox.showerror("ffmpeg not found", "Cannot find ffmpeg.exe at\n" + ffmpeg)
@@ -866,6 +905,14 @@ class ConverterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     def _worker(self, files, ffmpeg, ffprobe, settings):
+        try:
+            self._convert_all(files, ffmpeg, ffprobe, settings)
+        except Exception as exc:
+            self._queue.put(("err", "Internal error — batch aborted: %s\n" % exc))
+        finally:
+            self._queue.put(("done", None))
+
+    def _convert_all(self, files, ffmpeg, ffprobe, settings):
         total           = len(files)
         errors          = []
         successes       = 0
@@ -882,7 +929,9 @@ class ConverterApp(tk.Tk):
             self._queue.put(("status", "Converting %d/%d: %s" % (idx, total, os.path.basename(m4b))))
 
             processed += 1
-            tags, duration, chapters, source_bitrate = probe_metadata_and_chapters(ffmpeg, ffprobe, m4b)
+            tags, duration, chapters, source_bitrate, skipped_chapters = probe_metadata_and_chapters(ffmpeg, ffprobe, m4b)
+            for warning in skipped_chapters:
+                self._queue.put(("warn", "  %s\n" % warning))
             # Inject per-file source bitrate so build_ffmpeg_cmd can use it
             # when "Match source" (auto) mode is selected.
             settings["source_bitrate"] = source_bitrate
@@ -894,6 +943,13 @@ class ConverterApp(tk.Tk):
             mp3_path, cover_path, base_name = build_output_paths(
                 m4b, tags, settings["name_pattern"]
             )
+            if settings["split_chapters"] and bool(chapters):
+                cover_path = unique_path(cover_path)
+            else:
+                # Same tags in one dir (or a previous run) must not silently
+                # overwrite via '-y' (re-runs accumulate " (n)" names).
+                mp3_path = unique_path(mp3_path)
+                cover_path = os.path.splitext(mp3_path)[0] + " cover.jpg"
             self._queue.put(("info", "  -> %s\n" % mp3_path))
 
             split = settings["split_chapters"] and bool(chapters)
@@ -917,17 +973,28 @@ class ConverterApp(tk.Tk):
                             "%s - %s" % (base_name, chap_title or ("Chapter %d" % chap_idx))
                         )
                         chap_mp3 = os.path.join(os.path.dirname(mp3_path), chap_base + ".mp3")
+                        n = 2
+                        while chap_mp3 in chap_files:  # dup title would be silently overwritten by '-y'
+                            chap_mp3 = os.path.join(os.path.dirname(mp3_path),
+                                                    "%s (%d).mp3" % (chap_base, n))
+                            n += 1
+                        chap_mp3 = unique_path(chap_mp3)
                         chap_files.append(chap_mp3)
                         cmd = build_ffmpeg_cmd(ffmpeg, m4b, chap_mp3, settings, start=start, end=end)
                         chap_duration = max(0.0, end - start)
                         status = self._run_ffmpeg_with_progress(cmd, chap_duration, chap_mp3)
-                        if self._stop_event.is_set():
-                            self._current_proc and self._current_proc.terminate()
-                            status = "stopped"
+                        # _run_ffmpeg_with_progress already classifies 'stopped'
+                        # correctly; never downgrade a completed chapter to
+                        # 'stopped' (it would get deleted below).
                         if status == "ok":
                             completed_chaps.append(chap_mp3)
+                            if self._stop_event.is_set():
+                                self._queue.put(("warn",
+                                    "  Stop requested after chapter finished — keeping completed file.\n"))
                         elif file_status == "ok":
                             file_status = status
+                        if self._stop_event.is_set() and status != "ok":
+                            break
                 else:
                     cmd = build_ffmpeg_cmd(ffmpeg, m4b, mp3_path, settings)
                     file_status = self._run_ffmpeg_with_progress(cmd, duration, mp3_path)
@@ -938,13 +1005,15 @@ class ConverterApp(tk.Tk):
                 break
             except Exception as exc:
                 self._queue.put(("err", "  Exception: %s\n" % exc))
-                errors.append((m4b, str(exc)))
+                # Count exactly once — the summary block below records the
+                # ('conversion failed') entry when file_status == 'error'.
                 file_status = "error"
                 if not split and mp3_path and os.path.exists(mp3_path):
                     try:
                         os.remove(mp3_path)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self._queue.put(("warn",
+                            "  Could not delete partial file: %s\n" % e))
 
             if file_status == "stopped" and chap_files:
                 for cf in chap_files:
@@ -953,8 +1022,10 @@ class ConverterApp(tk.Tk):
                     try:
                         if os.path.exists(cf):
                             os.remove(cf)
-                    except OSError:
-                        pass
+                    except OSError as e:
+                        self._queue.put(("warn",
+                            "  Could not delete partial chapter %s: %s\n"
+                            % (os.path.basename(cf), e)))
 
             if file_status == "ok":
                 successes += 1
@@ -984,7 +1055,7 @@ class ConverterApp(tk.Tk):
                 self._queue.put(("err", "  %s\n    (%s)\n" % (path, reason)))
         else:
             self._queue.put(("ok", "\nAll files converted successfully.\n"))
-        self._queue.put(("done", None))
+        # NOTE: "done" is now pushed exactly once, by _worker's finally clause.
 
     # ------------------------------------------------------------------
     def _run_ffmpeg_with_progress(self, cmd, duration, dst):
@@ -1011,14 +1082,23 @@ class ConverterApp(tk.Tk):
             try:
                 if dst and os.path.exists(dst):
                     os.remove(dst)
-            except OSError:
-                pass
+            except OSError as e:
+                self._queue.put(("warn",
+                    "  Could not delete partial output %s: %s\n"
+                    % (os.path.basename(dst) if dst else dst, e)))
 
-        out_lines  = []
-        last_frac  = 0.0
+        out_lines       = []
+        last_frac       = 0.0
+        dropped_warned  = [False]
 
         try:
             while True:
+                if self._stop_event.is_set():
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    # fall through: keep draining the pipe so returncode is set
                 line = proc.stdout.readline()
                 if not line:
                     break
@@ -1028,6 +1108,10 @@ class ConverterApp(tk.Tk):
                 out_lines.append(line)
                 if self._queue.qsize() < 500:
                     self._queue.put(("plain", "    " + line + "\n"))
+                elif not dropped_warned[0]:
+                    dropped_warned[0] = True
+                    self._queue.put(("warn",
+                        "  (log backlog — some ffmpeg lines omitted from the detail view)\n"))
 
                 if duration and duration > 0 and "time=" in line:
                     try:
@@ -1143,6 +1227,7 @@ class ConverterApp(tk.Tk):
 
     # ------------------------------------------------------------------
     def _poll_queue(self):
+        done = False
         try:
             while True:
                 msg_type, payload = self._queue.get_nowait()
@@ -1152,7 +1237,8 @@ class ConverterApp(tk.Tk):
                     self._stop_btn.config(state=tk.DISABLED)
                     self._file_fraction = 1.0
                     self._refresh_progressbar()
-                    return
+                    done = True
+                    continue   # drain remaining messages before stopping
                 elif msg_type == "status":
                     self._status_var.set(payload)
                 elif msg_type == "progress":
@@ -1171,7 +1257,8 @@ class ConverterApp(tk.Tk):
             pass
         except Exception as e:
             print(f"Warning: _poll_queue error: {e}", file=sys.stderr)
-        self.after(100, self._poll_queue)
+        if not done:
+            self.after(100, self._poll_queue)
 
     # ------------------------------------------------------------------
     def _log_append(self, text, tag=None):

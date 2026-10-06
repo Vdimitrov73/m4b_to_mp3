@@ -3,6 +3,17 @@
 All notable changes to M4B to MP3 Batch Converter are listed here, newest first.
 
 ---
+## v1.0.5 — 2026-10-06
+
+fix: split-chapter metadata, output collision protection, hardened probing (v1.0.5)
+
+- split chapter parts no longer embed the full source chapter table with wrong timestamps; trimmed outputs drop embedded chapters
+- same-tag outputs no longer silently overwrite: unique " (2)" names for MP3s, chapter parts, and covers (cover follows the final mp3 name)
+- malformed or zero-length chapters are skipped individually and logged as warnings instead of discarding the whole chapter list
+- reserved Windows names (CON, NUL, COM1…) are sanitized so tagged titles can't fail the conversion
+- stop behavior: Scan/Start guarded while busy, completed chapters kept with a notice, partial-file cleanup failures logged instead of silent
+- batch robustness: worker exceptions abort cleanly with a single completion signal, pending log messages drain before progress stops, ffmpeg log backlog capped with a notice
+
 ## v1.0.4 — 2026-07-26
 fix: preserve completed chapters on stop, harden process cleanup (v1.0.4)
 - fix critical data-loss bug: stopping mid chapter-split no longer deletes
