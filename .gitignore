@@ -20,6 +20,10 @@ build/
 env/
 venv/
 ENV/
+build_env/
+
+# ── Local builds (mirrors qimpexp: kept out of git) ────────────────────────────
+build_exe.bat
 
 # ── Build artefacts ───────────────────────────────────────────────────────────
 release_staging/
